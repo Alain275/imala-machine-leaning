@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: imara-ai-service
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+      - key: API_KEY
+        value: imara-ai-key-2024-secure
+      - key: USE_HF_API
+        value: true
+      - key: HF_API_TOKEN
+        sync: false  # You'll add this in Render dashboard
+      - key: HF_REPO_ID
+        value: linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification
+      - key: CONFIDENCE_THRESHOLD
+        value: 0.5
+      - key: ALLOWED_ORIGINS
+        value: https://resilient-starship-55ff3d.netlify.app,https://imara-bn.onrender.com
