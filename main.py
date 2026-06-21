@@ -6,11 +6,15 @@ import numpy as np
 from PIL import Image
 import io   
 import os   
+import sys
 import json
 import base64
 import urllib.request
 import urllib.error
 from dotenv import load_dotenv
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 load_dotenv()
 
@@ -206,6 +210,7 @@ def _predict_via_hf_api(image_bytes: bytes) -> tuple[str, float]:
 
 def _predict_local_pytorch(image: Image.Image) -> tuple[str, float]:
     import torch
+    image = image.convert("RGB")
     inputs = _local_processor(images=image, return_tensors="pt")
     with torch.no_grad():
         logits = _local_model(**inputs).logits
