@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     runtime: python-3.11.9
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='linkanjarad/mobilenet_v2_1.0_224-plant-disease-identification', local_dir='./models/hf_model', ignore_patterns=['*.msgpack', 'flax_model*', 'rust_model*', 'onnx*'])"
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PORT
@@ -15,7 +15,13 @@ services:
       - key: API_KEY
         value: imara-ai-key-2024-secure
       - key: USE_HF_API
-        value: true
+        value: false
+      - key: MODEL_MODE
+        value: local
+      - key: DEMO_MODE
+        value: false
+      - key: HF_MODEL_PATH
+        value: ./models/hf_model
       - key: HF_API_TOKEN
         sync: false  # You'll add this in Render dashboard
       - key: HF_REPO_ID

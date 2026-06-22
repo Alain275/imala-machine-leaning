@@ -113,6 +113,8 @@ DISEASE_RECOMMENDATIONS = {
 }
 
 # ── Runtime configuration ─────────────────────────────────────────────────────
+MODEL_MODE    = os.getenv("MODEL_MODE", "local").lower()
+DEMO_MODE     = os.getenv("DEMO_MODE", "false").lower() == "true"
 USE_HF_API    = os.getenv("USE_HF_API", "false").lower() == "true"
 HF_API_TOKEN  = os.getenv("HF_API_TOKEN", "")
 HF_REPO_ID    = os.getenv("HF_REPO_ID",
@@ -126,24 +128,33 @@ ID2LABEL_PATH = "./models/id2label.json"
 # Lazy-loaded local model (Keras or PyTorch)
 _local_model      = None
 _local_processor  = None
+ACTIVE_BACKEND    = "none"
 
 
 @app.on_event("startup")
 async def startup():
-    global _local_model, _local_processor
+    global _local_model, _local_processor, ACTIVE_BACKEND
 
-    # ── Mode 1: HuggingFace Inference API ────────────────────────────────────
-    if USE_HF_API:
-        if HF_API_TOKEN:
-            print(f"✅ Mode: HuggingFace Inference API")
-            print(f"   Model: {HF_REPO_ID}")
-        else:
-            print("⚠️  USE_HF_API=true but HF_API_TOKEN is empty!")
-            print("   Run  python download_model.py  and choose option 1.")
-        return
+    print(f"--- IMARA AI Disease Detection Service ---")
+    print(f"Startup Info:")
+    print(f"  MODEL_MODE: {MODEL_MODE}")
+    print(f"  USE_HF_API: {USE_HF_API}")
+    print(f"  DEMO_MODE: {DEMO_MODE}")
+    print(f"  HF_MODEL_PATH: {HF_MODEL_PATH}")
+    hf_model_exists = os.path.exists(HF_MODEL_PATH)
+    print(f"  HF_MODEL_PATH exists: {hf_model_exists}")
+    if hf_model_exists:
+        try:
+            files = os.listdir(HF_MODEL_PATH)
+            print(f"  Files in HF_MODEL_PATH: {files}")
+        except Exception as e:
+            print(f"  Could not list files in HF_MODEL_PATH: {e}")
+    print(f"------------------------------------------")
 
-    # ── Mode 2: Local HuggingFace / PyTorch model ────────────────────────────
-    if os.path.exists(HF_MODEL_PATH):
+    target_mode = MODEL_MODE
+
+    def try_load_pytorch():
+        global _local_model, _local_processor
         try:
             from transformers import AutoImageProcessor, AutoModelForImageClassification
             import torch
@@ -154,24 +165,66 @@ async def startup():
                 with open(ID2LABEL_PATH) as f:
                     id2label = json.load(f)
                 DISEASE_CLASSES[:] = [id2label[str(i)] for i in range(len(id2label))]
-            print(f"✅ Mode: Local PyTorch model from {HF_MODEL_PATH}")
-            return
+            return True
         except Exception as e:
             print(f"⚠️  Could not load local HF model: {e}")
+            return False
 
-    # ── Mode 3: Local Keras .h5 model ────────────────────────────────────────
-    if os.path.exists(MODEL_PATH):
+    def try_load_keras():
+        global _local_model
         try:
             import tensorflow as tf
             _local_model = tf.keras.models.load_model(MODEL_PATH)
-            print(f"✅ Mode: Local Keras model from {MODEL_PATH}")
-            return
+            return True
         except Exception as e:
             print(f"⚠️  Could not load Keras model: {e}")
+            return False
 
-    # ── Mode 4: Demo mode ─────────────────────────────────────────────────────
-    print("⚠️  No model configured.  Running in demo mode.")
-    print("   Run  python download_model.py  to set up a model.")
+    if target_mode == "auto":
+        if os.path.exists(HF_MODEL_PATH) and try_load_pytorch():
+            ACTIVE_BACKEND = "local_pytorch"
+        elif os.path.exists(MODEL_PATH) and try_load_keras():
+            ACTIVE_BACKEND = "local_keras"
+        elif HF_API_TOKEN and HF_REPO_ID:
+            ACTIVE_BACKEND = "hf_api"
+        elif DEMO_MODE:
+            ACTIVE_BACKEND = "demo"
+        else:
+            raise RuntimeError("Auto mode failed: No local models found, no HF API token, and demo mode not allowed.")
+
+    elif target_mode == "local":
+        if os.path.exists(HF_MODEL_PATH) and try_load_pytorch():
+            ACTIVE_BACKEND = "local_pytorch"
+        elif os.path.exists(MODEL_PATH) and try_load_keras():
+            ACTIVE_BACKEND = "local_keras"
+        else:
+            if DEMO_MODE:
+                ACTIVE_BACKEND = "demo"
+            else:
+                raise RuntimeError(f"Startup failed: Local models missing or failed to load. HF_MODEL_PATH={HF_MODEL_PATH}")
+
+    elif target_mode == "hf_api":
+        if HF_API_TOKEN and HF_REPO_ID:
+            ACTIVE_BACKEND = "hf_api"
+        else:
+            if DEMO_MODE:
+                ACTIVE_BACKEND = "demo"
+            else:
+                raise RuntimeError("Startup failed: hf_api mode requires HF_API_TOKEN and HF_REPO_ID")
+
+    elif target_mode == "demo":
+        ACTIVE_BACKEND = "demo"
+    else:
+        raise RuntimeError(f"Unknown MODEL_MODE: {MODEL_MODE}")
+
+    if ACTIVE_BACKEND == "local_pytorch":
+        print(f"✅ Mode: Local PyTorch model from {HF_MODEL_PATH}")
+    elif ACTIVE_BACKEND == "local_keras":
+        print(f"✅ Mode: Local Keras model from {MODEL_PATH}")
+    elif ACTIVE_BACKEND == "hf_api":
+        print(f"✅ Mode: HuggingFace Inference API\n   Model: {HF_REPO_ID}")
+    elif ACTIVE_BACKEND == "demo":
+        print("⚠️  Running in demo mode.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,25 +302,28 @@ def get_disease_info(disease_name: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    mode = (
-        "hf_api"   if USE_HF_API and HF_API_TOKEN else
-        "local_pt" if _local_processor is not None else
-        "local_keras" if _local_model is not None and not USE_HF_API else
-        "demo"
-    )
+    model_name = "demo"
+    if ACTIVE_BACKEND == "local_pytorch":
+        model_name = HF_MODEL_PATH
+    elif ACTIVE_BACKEND == "local_keras":
+        model_name = MODEL_PATH
+    elif ACTIVE_BACKEND == "hf_api":
+        model_name = HF_REPO_ID
+
     return {
         "service": "IMARA AI Disease Detection",
         "version": "1.0.0",
         "status": "running",
-        "mode": mode,
-        "model": HF_REPO_ID if USE_HF_API else MODEL_PATH,
+        "mode": ACTIVE_BACKEND,
+        "model": model_name,
+        "active_backend": ACTIVE_BACKEND
     }
 
 
 @app.get("/health")
 def health_check():
-    ready = USE_HF_API and bool(HF_API_TOKEN) or _local_model is not None
-    return {"status": "healthy", "ready": ready}
+    ready = ACTIVE_BACKEND in ["local_pytorch", "local_keras", "hf_api", "demo"]
+    return {"status": "healthy", "ready": ready, "backend": ACTIVE_BACKEND}
 
 
 @app.post("/api/detect")
@@ -288,12 +344,12 @@ async def detect_disease(
     # ── Route to correct inference backend ───────────────────────────────────
     demo_mode = False
 
-    if USE_HF_API and HF_API_TOKEN:
+    if ACTIVE_BACKEND == "hf_api":
         disease_class, confidence = _predict_via_hf_api(contents)
-    elif _local_processor is not None:          # local PyTorch (HF model)
+    elif ACTIVE_BACKEND == "local_pytorch":
         image = Image.open(io.BytesIO(contents))
         disease_class, confidence = _predict_local_pytorch(image)
-    elif _local_model is not None:              # local Keras .h5
+    elif ACTIVE_BACKEND == "local_keras":
         image = Image.open(io.BytesIO(contents))
         disease_class, confidence = _predict_local_keras(image)
     else:                                        # demo / fallback
@@ -303,6 +359,14 @@ async def detect_disease(
         print("⚠️ Running in demo mode — returning mock prediction")
 
     disease_info = get_disease_info(disease_class)
+
+    metadata_model = "demo"
+    if ACTIVE_BACKEND == "local_pytorch":
+        metadata_model = HF_MODEL_PATH
+    elif ACTIVE_BACKEND == "local_keras":
+        metadata_model = os.path.basename(MODEL_PATH)
+    elif ACTIVE_BACKEND == "hf_api":
+        metadata_model = HF_REPO_ID
 
     return {
         "success": True,
@@ -319,10 +383,10 @@ async def detect_disease(
             "prevention": disease_info["prevention"],
         },
         "metadata": {
-            "model":      HF_REPO_ID if USE_HF_API else os.path.basename(MODEL_PATH),
+            "model":      metadata_model,
             "classes":    len(DISEASE_CLASSES),
             "demo_mode":  demo_mode,
-            "mode":       "hf_api" if USE_HF_API else ("local" if not demo_mode else "demo"),
+            "mode":       "local" if ACTIVE_BACKEND.startswith("local") else ACTIVE_BACKEND,
         }
     }
 
