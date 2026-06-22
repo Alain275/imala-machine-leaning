@@ -156,6 +156,16 @@ async def startup():
     def try_load_pytorch():
         global _local_model, _local_processor
         try:
+            import json
+            prep_path = os.path.join(HF_MODEL_PATH, "preprocessor_config.json")
+            if os.path.exists(prep_path):
+                with open(prep_path, "r") as f:
+                    prep_cfg = json.load(f)
+                if prep_cfg.get("image_processor_type") == "MobileNetV2FeatureExtractor":
+                    prep_cfg["image_processor_type"] = "MobileNetV2ImageProcessor"
+                    with open(prep_path, "w") as f:
+                        json.dump(prep_cfg, f)
+
             from transformers import AutoImageProcessor, AutoModelForImageClassification
             import torch
             _local_processor = AutoImageProcessor.from_pretrained(HF_MODEL_PATH)
