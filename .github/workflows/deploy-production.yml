@@ -38,12 +38,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ steps.release.outputs.sha }}
+          lfs: true
       - name: Package ML source and runtime model
         run: |
           set -Eeuo pipefail
           test -s models/hf_model/config.json
           test -s models/hf_model/preprocessor_config.json
           test -s models/hf_model/pytorch_model.bin
+          test "$(stat -c%s models/hf_model/pytorch_model.bin)" -gt 1000000 || {
+            echo "Model weights were not downloaded from Git LFS" >&2
+            exit 1
+          }
           mkdir -p package
           rsync -a ./ package/ \
             --exclude='package/' --exclude='.env*' --exclude='.venv/' --exclude='__pycache__/' \
