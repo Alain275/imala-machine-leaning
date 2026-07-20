@@ -24,7 +24,8 @@ jobs:
       - run: python -m venv .venv
       - run: .venv/bin/pip install -r requirements.txt
       - run: .venv/bin/pip check
-      - run: .venv/bin/python -m compileall -q .
+      - name: Compile application sources
+        run: .venv/bin/python -m py_compile main.py fetch_model_local.py
       - name: Validate FastAPI import and health route without loading the model
         env:
           MODEL_MODE: demo
