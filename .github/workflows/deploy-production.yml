@@ -67,14 +67,36 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" | ssh-add - >/dev/null
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >>"$GITHUB_ENV"
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >>"$GITHUB_ENV"
-      - name: Upload and restart ML API
+      - name: Verify VPS ML directories
         run: |
           set -Eeuo pipefail
           target=/srv/imara/ml
           venv=/srv/imara/ml-venv
-          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "test -d '$target' && test -w '$target'"
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "
+            test -d '$target' || { echo 'Missing directory: $target' >&2; exit 20; }
+            test -w '$target' || { echo 'Directory is not writable by $VPS_USER: $target' >&2; ls -ld '$target' >&2; exit 21; }
+            test -d '$venv' || { echo 'Missing directory: $venv' >&2; exit 22; }
+            test -w '$venv' || { echo 'Directory is not writable by $VPS_USER: $venv' >&2; ls -ld '$venv' >&2; exit 23; }
+          "
+      - name: Upload ML release
+        run: |
+          set -Eeuo pipefail
+          target=/srv/imara/ml
           rsync -az --delete -e "ssh -o BatchMode=yes" package/ "$VPS_USER@$VPS_HOST:$target/"
-          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "cd '$target/models/hf_model' && sha256sum -c SHA256SUMS && (test -x '$venv/bin/python' || python3 -m venv '$venv') && '$venv/bin/pip' install --no-cache-dir -r '$target/requirements.txt' && '$venv/bin/pip' check && sudo /usr/bin/systemctl restart imara-ml.service"
+      - name: Verify uploaded model
+        run: |
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "cd /srv/imara/ml/models/hf_model && sha256sum -c SHA256SUMS"
+      - name: Prepare Python environment
+        run: |
+          set -Eeuo pipefail
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "test -x /srv/imara/ml-venv/bin/python || python3 -m venv /srv/imara/ml-venv"
+      - name: Install ML dependencies
+        run: |
+          set -Eeuo pipefail
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "/srv/imara/ml-venv/bin/pip install --no-cache-dir -r /srv/imara/ml/requirements.txt && /srv/imara/ml-venv/bin/pip check"
+      - name: Restart ML service
+        run: |
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "sudo /usr/bin/systemctl restart imara-ml.service"
       - name: Verify ML API
         run: |
           set -Eeuo pipefail
