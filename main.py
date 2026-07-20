@@ -12,16 +12,24 @@ import base64
 import urllib.request
 import urllib.error
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 load_dotenv()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await startup()
+    yield
+
 app = FastAPI(
     title="IMARA AI Disease Detection Service",
     description="PlantVillage MobileNetV2 Disease Detection API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS Configuration
@@ -34,7 +42,7 @@ app.add_middleware(
 )
 
 # API Key Authentication
-API_KEY = os.getenv("API_KEY", "imara-ai-key-2024-secure")
+API_KEY = os.getenv("API_KEY", "")
 
 def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
@@ -131,9 +139,11 @@ _local_processor  = None
 ACTIVE_BACKEND    = "none"
 
 
-@app.on_event("startup")
 async def startup():
     global _local_model, _local_processor, ACTIVE_BACKEND
+
+    if not API_KEY and MODEL_MODE != "demo":
+        raise RuntimeError("API_KEY is required outside demo mode")
 
     print(f"--- IMARA AI Disease Detection Service ---")
     print(f"Startup Info:")
@@ -156,6 +166,9 @@ async def startup():
     def try_load_pytorch():
         global _local_model, _local_processor
         try:
+            # Local production inference only: never contact the Hugging Face Hub.
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             import json
             prep_path = os.path.join(HF_MODEL_PATH, "preprocessor_config.json")
             if os.path.exists(prep_path):
@@ -168,8 +181,14 @@ async def startup():
 
             from transformers import AutoImageProcessor, AutoModelForImageClassification
             import torch
-            _local_processor = AutoImageProcessor.from_pretrained(HF_MODEL_PATH)
-            _local_model = AutoModelForImageClassification.from_pretrained(HF_MODEL_PATH)
+            _local_processor = AutoImageProcessor.from_pretrained(
+                HF_MODEL_PATH,
+                local_files_only=True,
+            )
+            _local_model = AutoModelForImageClassification.from_pretrained(
+                HF_MODEL_PATH,
+                local_files_only=True,
+            )
             _local_model.eval()
             if os.path.exists(ID2LABEL_PATH):
                 with open(ID2LABEL_PATH) as f:
@@ -333,7 +352,7 @@ def root():
 @app.get("/health")
 def health_check():
     ready = ACTIVE_BACKEND in ["local_pytorch", "local_keras", "hf_api", "demo"]
-    return {"status": "healthy", "ready": ready, "backend": ACTIVE_BACKEND}
+    return {"status": "ok", "service": "imara-ml", "ready": ready, "backend": ACTIVE_BACKEND}
 
 
 @app.post("/api/detect")
@@ -414,4 +433,5 @@ def get_supported_diseases(api_key: str = Depends(verify_api_key)):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = os.getenv("HOST", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port)

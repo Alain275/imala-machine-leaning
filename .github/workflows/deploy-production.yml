@@ -1,0 +1,91 @@
+name: Deploy ML to production
+
+on:
+  workflow_run:
+    workflows: [ML CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imara-ml-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: production_imara
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_USER: ${{ vars.VPS_USER || 'deploy' }}
+      IMARA_PUBLIC_URL: ${{ vars.IMARA_PUBLIC_URL }}
+    steps:
+      - name: Resolve release SHA
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == workflow_run ]]; then sha="$WORKFLOW_SHA"; else sha="$CURRENT_SHA"; fi
+          [[ "$sha" =~ ^[a-f0-9]{40}$ ]]
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.release.outputs.sha }}
+      - name: Package ML source and runtime model
+        run: |
+          set -Eeuo pipefail
+          test -s models/hf_model/config.json
+          test -s models/hf_model/preprocessor_config.json
+          test -s models/hf_model/pytorch_model.bin
+          mkdir -p package
+          rsync -a ./ package/ \
+            --exclude='package/' --exclude='.env*' --exclude='.venv/' --exclude='__pycache__/' \
+            --exclude='*.pyc' --exclude='.git/' --exclude='.github/' --exclude='models/' \
+            --exclude='runs/'
+          install -d package/models/hf_model
+          cp models/hf_model/config.json models/hf_model/preprocessor_config.json \
+            models/hf_model/pytorch_model.bin package/models/hf_model/
+          (cd package/models/hf_model && sha256sum config.json preprocessor_config.json pytorch_model.bin > SHA256SUMS)
+          ! find package -type f \( -name '.env' -o -name '*.pem' -o -name '*.key' \) | grep -q .
+      - name: Configure verified SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >"$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+          eval "$(ssh-agent -s)"
+          printf '%s\n' "$SSH_PRIVATE_KEY" | ssh-add - >/dev/null
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >>"$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >>"$GITHUB_ENV"
+      - name: Upload and restart ML API
+        run: |
+          set -Eeuo pipefail
+          target=/srv/imara/ml
+          venv=/srv/imara/ml-venv
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "test -d '$target' && test -w '$target'"
+          rsync -az --delete -e "ssh -o BatchMode=yes" package/ "$VPS_USER@$VPS_HOST:$target/"
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "cd '$target/models/hf_model' && sha256sum -c SHA256SUMS && (test -x '$venv/bin/python' || python3 -m venv '$venv') && '$venv/bin/pip' install --no-cache-dir -r '$target/requirements.txt' && '$venv/bin/pip' check && sudo /usr/bin/systemctl restart imara-ml.service"
+      - name: Verify ML API
+        run: |
+          set -Eeuo pipefail
+          ssh -o BatchMode=yes "$VPS_USER@$VPS_HOST" "sudo /usr/bin/systemctl is-active imara-ml.service"
+          curl --fail --silent --show-error --retry 20 --retry-delay 5 "$IMARA_PUBLIC_URL/ml/health"
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "## ML deployment"
+            echo "- Release: \`${{ steps.release.outputs.sha }}\`"
+            echo "- API: $IMARA_PUBLIC_URL/ml/"
+            echo "- Result: ${{ job.status }}"
+          } >>"$GITHUB_STEP_SUMMARY"
