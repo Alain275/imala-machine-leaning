@@ -1,6 +1,6 @@
 absl-py==2.4.0
 aiofiles==23.2.1
-annotated-doc==0.0.4
+annotated-doc==0.0.4 
 annotated-types==0.7.0
 anyio==4.13.0
 astunparse==1.6.3
